@@ -12,6 +12,17 @@
 # from the Actions UI with an explicit version. Publishing attaches the built
 # binaries to that version's GitHub Release. There is NO auto-release on every
 # push to `main`.
+#
+# --- Shorts Factory fork (boksajang/audio.cpp, branch sf/ci) ---
+# Modified for the fork; see FORK_NOTES.md. Changes vs upstream v0.9.2:
+#   * Trigger: `sf-v*` tags (e.g. sf-v0.9.2-base) or workflow_dispatch. The
+#     upstream `v*` tag trigger is removed so upstream tags never build here.
+#   * Matrix restricted to the targets Shorts Factory ships: Windows x64 CUDA
+#     13.3 + 12.4 and macOS arm64 Metal. The other jobs are removed.
+#   * Release tag keeps the `sf-` prefix (asset names: audio-<tag>-...); the
+#     embedded version string becomes <upstream version>-sf[-suffix].
+#   * Release notes are written explicitly (no --generate-notes) and a
+#     SHA256SUMS.txt asset is attached.
 
 name: Release
 
@@ -40,7 +51,7 @@ on:
         type: string
   push:
     tags:
-      - 'v*'
+      - 'sf-v*'
 
 env:
   GH_TOKEN: ${{ github.token }}
@@ -98,32 +109,20 @@ jobs:
           elif [[ -n "${{ inputs.version }}" ]]; then
             TAG="${{ inputs.version }}"
           else
-            echo "::error::No semver tag or version provided (push a v* tag, or run manually with a version)."
+            echo "::error::No tag or version provided (push an sf-v* tag, or run manually with a version)."
             exit 1
           fi
-          [[ "$TAG" == v* ]] || TAG="v${TAG}"
-          VERSION="${TAG#v}"
+          # Fork tags: sf-vX.Y.Z[-suffix] -> version string X.Y.Z-sf[-suffix].
+          [[ "$TAG" == sf-v* ]] || TAG="sf-v${TAG#v}"
+          BASE="${TAG#sf-v}"
+          CORE="${BASE%%-*}"
+          VERSION="${CORE}-sf${BASE#"$CORE"}"
+          if ! [[ "$CORE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag must look like sf-vX.Y.Z[-suffix], got ${TAG}"
+            exit 1
+          fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-  server-config-examples:
-    name: Server config examples
-    needs: get-version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Package server config examples
-        env:
-          TAG: ${{ needs.get-version.outputs.tag }}
-        run: zip -qr "audio-${TAG}-server-config-examples.zip" LICENSE examples/server
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-server-config-examples
-          path: audio-${{ needs.get-version.outputs.tag }}-server-config-examples.zip
-          if-no-files-found: error
 
   macos-metal:
     name: macOS (${{ matrix.build }})
@@ -138,11 +137,6 @@ jobs:
             arch: 'arm64'
             os: macos-26
             defines: '-DGGML_METAL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF'
-          - build: 'x64'
-            arch: 'x64'
-            os: macos-15-intel
-            # Metal disabled on x64 (GitHub Intel runners have no usable GPU)
-            defines: '-DGGML_METAL=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DENGINE_ENABLE_OPENMP=OFF -DGGML_OPENMP=OFF'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -181,641 +175,6 @@ jobs:
         with:
           name: audio-${{ needs.get-version.outputs.tag }}-lib-macos-${{ matrix.arch }}-metal
           path: audio-${{ needs.get-version.outputs.tag }}-lib-macos-${{ matrix.arch }}-metal.tar.gz
-
-
-  linux-cpu:
-    name: Ubuntu x64 (CPU)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake make glslc libvulkan-dev spirv-headers
-      - name: Configure
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
-            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} \
-            ${{ env.CMAKE_ARGS }}
-      - name: Build
-        run: cmake --build build --config Release --parallel "$(nproc)" --target ${{ env.BUILD_TARGETS }}
-      - name: Stage bundle
-        run: |
-          cp LICENSE build/bin/ 2>/dev/null || true
-          cp -r tools build/bin/tools 2>/dev/null || true
-          cp -r model_specs build/bin/model_specs 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-ubuntu-x64-cpu
-          path: build/bin/*
-      - name: Build and stage C API library
-        run: |
-          cmake -S . -B build -DAUDIOCPP_BUILD_C_API=ON
-          cmake --build build --parallel "$(nproc)" --target audiocpp
-          mkdir -p dist-lib/libs dist-lib/include
-          cp include/audiocpp.h dist-lib/include/
-          cp LICENSE dist-lib/
-          find build/bin -maxdepth 1 \( -name '*.so*' -o -name '*.dylib' \) -exec cp -P {} dist-lib/libs/ \;
-          mv build/bin/libaudiocpp* dist-lib/libs/
-          tar -czf audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cpu.tar.gz -C dist-lib .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cpu
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cpu.tar.gz
-
-
-  linux-cpu-portable:
-    name: Ubuntu x64 (CPU portable)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake make glslc libvulkan-dev spirv-headers
-      - name: Configure
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
-            -DENGINE_ENABLE_NATIVE_CPU=OFF \
-            -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON \
-            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} \
-            ${{ env.CMAKE_ARGS }}
-      - name: Build
-        run: cmake --build build --config Release --parallel "$(nproc)" --target ${{ env.BUILD_TARGETS }}
-      - name: Stage bundle
-        run: |
-          cp LICENSE build/bin/ 2>/dev/null || true
-          cp -r tools build/bin/tools 2>/dev/null || true
-          cp -r model_specs build/bin/model_specs 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-ubuntu-x64-cpu-portable
-          path: build/bin/*
-      - name: Build and stage C API library
-        run: |
-          cmake -S . -B build -DAUDIOCPP_BUILD_C_API=ON
-          cmake --build build --parallel "$(nproc)" --target audiocpp
-          mkdir -p dist-lib/libs dist-lib/include
-          cp include/audiocpp.h dist-lib/include/
-          cp LICENSE dist-lib/
-          find build/bin -maxdepth 1 \( -name '*.so*' -o -name '*.dylib' \) -exec cp -P {} dist-lib/libs/ \;
-          mv build/bin/libaudiocpp* dist-lib/libs/
-          tar -czf audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cpu-portable.tar.gz -C dist-lib .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cpu-portable
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cpu-portable.tar.gz
-
-
-  linux-vulkan:
-    name: Ubuntu x64 (Vulkan)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake make glslc libvulkan-dev spirv-headers
-      - name: Configure
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=ON \
-            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} \
-            ${{ env.CMAKE_ARGS }}
-      - name: Build
-        run: cmake --build build --config Release --parallel "$(nproc)" --target ${{ env.BUILD_TARGETS }}
-      - name: Stage bundle
-        run: |
-          cp LICENSE build/bin/ 2>/dev/null || true
-          cp -r tools build/bin/tools 2>/dev/null || true
-          cp -r model_specs build/bin/model_specs 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-ubuntu-x64-vulkan
-          path: build/bin/*
-      - name: Build and stage C API library
-        run: |
-          cmake -S . -B build -DAUDIOCPP_BUILD_C_API=ON
-          cmake --build build --parallel "$(nproc)" --target audiocpp
-          mkdir -p dist-lib/libs dist-lib/include
-          cp include/audiocpp.h dist-lib/include/
-          cp LICENSE dist-lib/
-          find build/bin -maxdepth 1 \( -name '*.so*' -o -name '*.dylib' \) -exec cp -P {} dist-lib/libs/ \;
-          mv build/bin/libaudiocpp* dist-lib/libs/
-          tar -czf audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-vulkan.tar.gz -C dist-lib .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-vulkan
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-vulkan.tar.gz
-
-
-  linux-vulkan-portable:
-    name: Ubuntu x64 (Vulkan portable)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake make glslc libvulkan-dev spirv-headers
-      - name: Configure
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=ON \
-            -DENGINE_ENABLE_NATIVE_CPU=OFF \
-            -DENGINE_ENABLE_CPU_ALL_VARIANTS=ON \
-            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} \
-            ${{ env.CMAKE_ARGS }}
-      - name: Build
-        run: cmake --build build --config Release --parallel "$(nproc)" --target ${{ env.BUILD_TARGETS }}
-      - name: Stage bundle
-        run: |
-          cp LICENSE build/bin/ 2>/dev/null || true
-          cp -r tools build/bin/tools 2>/dev/null || true
-          cp -r model_specs build/bin/model_specs 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-ubuntu-x64-vulkan-portable
-          path: build/bin/*
-      - name: Build and stage C API library
-        run: |
-          cmake -S . -B build -DAUDIOCPP_BUILD_C_API=ON
-          cmake --build build --parallel "$(nproc)" --target audiocpp
-          mkdir -p dist-lib/libs dist-lib/include
-          cp include/audiocpp.h dist-lib/include/
-          cp LICENSE dist-lib/
-          find build/bin -maxdepth 1 \( -name '*.so*' -o -name '*.dylib' \) -exec cp -P {} dist-lib/libs/ \;
-          mv build/bin/libaudiocpp* dist-lib/libs/
-          tar -czf audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-vulkan-portable.tar.gz -C dist-lib .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-vulkan-portable
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-vulkan-portable.tar.gz
-
-
-  linux-cuda-library:
-    name: 'Ubuntu x64 library (CUDA ${{ matrix.label }})'
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: ubuntu-latest
-    container: nvidia/cuda:${{ matrix.cuda }}-devel-ubuntu22.04
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - cuda: '12.8.1'
-            label: '12.8'
-            archs: '75;80;86;89;90'
-          - cuda: '13.3.0'
-            label: '13.3'
-            archs: '75;80;86;89;90;120'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Install dependencies
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
-          add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-13 g++-13 cmake ninja-build python3 python-is-python3
-      - name: Build library
-        env:
-          CC: gcc-13
-          CXX: g++-13
-          CUDAHOSTCXX: g++-13
-        run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_CUDA_ARCHITECTURES=${{ matrix.archs }}" \
-            ${{ matrix.label == '12.8' && '-DGGML_CUDA_NCCL=OFF' || '' }} \
-            -DENGINE_ENABLE_CUDA=ON -DENGINE_ENABLE_VULKAN=OFF \
-            -DENGINE_ENABLE_NATIVE_CPU=OFF -DENGINE_BUILD_TESTS=OFF \
-            -DCMAKE_SHARED_LINKER_FLAGS='-static-libstdc++ -static-libgcc' \
-            -DCMAKE_INSTALL_RPATH='$ORIGIN' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
-            -DAUDIOCPP_BUILD_C_API=ON -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
-            -DENGINE_ENABLE_LLAMAFILE=ON -DENGINE_ENABLE_CUDA_GRAPHS=ON \
-            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }}
-          cmake --build build --parallel "$(nproc)" --target audiocpp
-      - name: Stage library
-        run: |
-          mkdir -p dist-lib/libs dist-lib/include dist-cudart
-          cp include/audiocpp.h dist-lib/include/
-          cp LICENSE dist-lib/
-          cp -P build/bin/libaudiocpp.so* dist-lib/libs/
-          ldd build/bin/libaudiocpp.so > build/library-dependencies.txt
-          awk '$3 ~ /^\/usr\/local\/cuda/ {print $1, $3}' build/library-dependencies.txt |
-            sort -u | while read -r name path; do cp -L "$path" "dist-cudart/$name"; done
-          cp /usr/share/doc/gcc-13-base/copyright dist-lib/GCC-RUNTIME-LICENSE
-          tar -czf audio-${{ needs.get-version.outputs.tag }}-cudart-ubuntu-x64-cuda${{ matrix.label }}.tar.gz -C dist-cudart .
-          tar -czf audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cuda${{ matrix.label }}.tar.gz -C dist-lib .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cuda${{ matrix.label }}
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-ubuntu-x64-cuda${{ matrix.label }}.tar.gz
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-cudart-ubuntu-x64-cuda${{ matrix.label }}
-          path: audio-${{ needs.get-version.outputs.tag }}-cudart-ubuntu-x64-cuda${{ matrix.label }}.tar.gz
-
-
-  linux-cuda-colab:
-    name: Ubuntu x64 (CUDA 12.8, Colab T4)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    container: nvidia/cuda:12.8.1-devel-ubuntu22.04
-    env:
-      CC: gcc-13
-      CXX: g++-13
-      CUDAHOSTCXX: g++-13
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Install dependencies
-        run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq software-properties-common
-          add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc-13 g++-13 cmake ninja-build libssl-dev
-      - name: Configure
-        run: |
-          cmake -S . -B build/colab-cuda -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            "-DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90" \
-            -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc' \
-            -DENGINE_ENABLE_CUDA=ON \
-            -DENGINE_ENABLE_VULKAN=OFF \
-            -DENGINE_ENABLE_NATIVE_CPU=OFF \
-            -DENGINE_BUILD_TESTS=OFF \
-            -DAUDIOCPP_VERSION=${{ needs.get-version.outputs.version }} \
-            -DAUDIOCPP_DEPLOYMENT_BUILD=ON \
-            -DAUDIOCPP_BUILD_NATIVE_MODEL_MANAGER=ON \
-            -DAUDIOCPP_USE_SYSTEM_OPENSSL=ON \
-            -DENGINE_ENABLE_LLAMAFILE=ON \
-            -DENGINE_ENABLE_CUDA_GRAPHS=ON
-      - name: Build server
-        run: cmake --build build/colab-cuda --parallel "$(nproc)" --target audiocpp_server
-      - name: Verify portable executable
-        run: |
-          ldd build/colab-cuda/bin/audiocpp_server | tee /tmp/audiocpp_server.ldd
-          if awk '/libcuda\.so\.1/ && /not found/ { next } /not found/ { print; bad=1 } END { exit bad ? 1 : 0 }' /tmp/audiocpp_server.ldd > /tmp/audiocpp_server.bad; then
-            true
-          else
-            echo "::error::The Colab executable has missing runtime dependencies."
-            cat /tmp/audiocpp_server.bad
-            exit 1
-          fi
-          readelf -d build/colab-cuda/bin/audiocpp_server | tee /tmp/audiocpp_server.needed
-          if grep -E 'Shared library: \[(libstdc\+\+|libgcc_s)\.so' /tmp/audiocpp_server.needed > /tmp/audiocpp_server.direct_bad; then
-            echo "::error::The Colab executable directly depends on non-portable C++ runtime libraries."
-            cat /tmp/audiocpp_server.direct_bad
-            exit 1
-          fi
-      - name: Stage bundle
-        run: |
-          mkdir -p dist/models
-          install -m 0755 build/colab-cuda/bin/audiocpp_server dist/audiocpp_server
-          install -m 0644 LICENSE dist/LICENSE
-          cp -r tools dist/tools
-          cp -r model_specs dist/model_specs
-          sha256sum dist/audiocpp_server > dist/SHA256SUMS
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-ubuntu-x64-cuda12.8-colab
-          path: dist/*
-
-  windows-cpu:
-    name: Windows x64 (CPU)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Build
-        shell: pwsh
-        run: |
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_cli -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_server -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_gguf -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
-      - name: Bundle VC runtime
-        shell: pwsh
-        working-directory: build/windows-cpu-release/bin
-        # App-local deployment of the MSVC runtime so the prebuilt binaries run
-        # on clean Windows without a separately installed VC++ Redistributable.
-        # Sizes: vcruntime140* + msvcp140* + vcomp140 ~2 MB (well under 1 MB
-        # compressed), negligible against the CPU/Vulkan/CUDA zip sizes.
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          $redist = Get-ChildItem "$vs\VC\Redist\MSVC" -Directory |
-            Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } -Descending |
-            Select-Object -First 1
-          foreach ($sub in 'x64\Microsoft.VC143.CRT', 'x64\Microsoft.VC143.OPENMP') {
-            $dir = Join-Path $redist.FullName $sub
-            if (Test-Path $dir) {
-              Get-ChildItem "$dir\*.dll" | Where-Object {
-                $_.Name -match '^(vcruntime140|msvcp140|vcomp140)'
-              } | Copy-Item -Destination . -ErrorAction SilentlyContinue
-            }
-          }
-          Get-ChildItem *.dll | Select-Object Name | Out-String | Write-Host
-      - name: Stage bundle
-        shell: pwsh
-        working-directory: build/windows-cpu-release/bin
-        run: |
-          cp ..\..\..\LICENSE . 2>$null
-          Copy-Item -Recurse ..\..\..\tools .\tools -ErrorAction SilentlyContinue
-          Copy-Item -Recurse ..\..\..\model_specs .\model_specs -ErrorAction SilentlyContinue
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-windows-x64-cpu
-          path: build/windows-cpu-release/bin/*
-      - name: Build and stage C API library
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          & "$vs/Common7/Tools/Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          cmake -S . -B build/windows-cpu-release -DAUDIOCPP_BUILD_C_API=ON
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build/windows-cpu-release --config Release --parallel $env:NUMBER_OF_PROCESSORS --target audiocpp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force -Path dist-lib/libs, dist-lib/include | Out-Null
-          Copy-Item include/audiocpp.h dist-lib/include/
-          Copy-Item LICENSE dist-lib/
-          Copy-Item build/windows-cpu-release/bin/*.dll dist-lib/libs/
-          Move-Item build/windows-cpu-release/bin/audiocpp.* dist-lib/libs/ -Force
-          Compress-Archive -Path dist-lib/* -DestinationPath audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-cpu.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-cpu
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-cpu.zip
-
-
-  windows-cpu-portable:
-    name: Windows x64 (CPU portable)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Build
-        shell: pwsh
-        run: |
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_cli -DeploymentBuild -NativeModelManager -CpuArch baseline -Llamafile OFF -Version ${{ needs.get-version.outputs.version }}
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_server -DeploymentBuild -NativeModelManager -CpuArch baseline -Llamafile OFF -Version ${{ needs.get-version.outputs.version }}
-          .\scripts\build_windows.ps1 -Preset windows-cpu-release -Target audiocpp_gguf -DeploymentBuild -NativeModelManager -CpuArch baseline -Llamafile OFF -Version ${{ needs.get-version.outputs.version }}
-      - name: Bundle VC runtime
-        shell: pwsh
-        working-directory: build/windows-cpu-release/bin
-        # App-local deployment of the MSVC runtime so the prebuilt binaries run
-        # on clean Windows without a separately installed VC++ Redistributable.
-        # Sizes: vcruntime140* + msvcp140* + vcomp140 ~2 MB (well under 1 MB
-        # compressed), negligible against the CPU/Vulkan/CUDA zip sizes.
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          $redist = Get-ChildItem "$vs\VC\Redist\MSVC" -Directory |
-            Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } -Descending |
-            Select-Object -First 1
-          foreach ($sub in 'x64\Microsoft.VC143.CRT', 'x64\Microsoft.VC143.OPENMP') {
-            $dir = Join-Path $redist.FullName $sub
-            if (Test-Path $dir) {
-              Get-ChildItem "$dir\*.dll" | Where-Object {
-                $_.Name -match '^(vcruntime140|msvcp140|vcomp140)'
-              } | Copy-Item -Destination . -ErrorAction SilentlyContinue
-            }
-          }
-          Get-ChildItem *.dll | Select-Object Name | Out-String | Write-Host
-      - name: Stage bundle
-        shell: pwsh
-        working-directory: build/windows-cpu-release/bin
-        run: |
-          cp ..\..\..\LICENSE . 2>$null
-          Copy-Item -Recurse ..\..\..\tools .\tools -ErrorAction SilentlyContinue
-          Copy-Item -Recurse ..\..\..\model_specs .\model_specs -ErrorAction SilentlyContinue
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-windows-x64-cpu-portable
-          path: build/windows-cpu-release/bin/*
-      - name: Build and stage C API library
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          & "$vs/Common7/Tools/Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          cmake -S . -B build/windows-cpu-release -DAUDIOCPP_BUILD_C_API=ON
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build/windows-cpu-release --config Release --parallel $env:NUMBER_OF_PROCESSORS --target audiocpp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force -Path dist-lib/libs, dist-lib/include | Out-Null
-          Copy-Item include/audiocpp.h dist-lib/include/
-          Copy-Item LICENSE dist-lib/
-          Copy-Item build/windows-cpu-release/bin/*.dll dist-lib/libs/
-          Move-Item build/windows-cpu-release/bin/audiocpp.* dist-lib/libs/ -Force
-          Compress-Archive -Path dist-lib/* -DestinationPath audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-cpu-portable.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-cpu-portable
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-cpu-portable.zip
-
-
-  windows-vulkan:
-    name: Windows x64 (Vulkan)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Install Vulkan SDK
-        shell: pwsh
-        run: |
-          curl.exe -o "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
-          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
-          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\\VulkanSDK\\${env:VULKAN_VERSION}"
-          Add-Content $env:GITHUB_PATH "C:\\VulkanSDK\\${env:VULKAN_VERSION}\\bin"
-      - name: Build
-        shell: pwsh
-        run: |
-          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_cli -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
-          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_server -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
-          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -Target audiocpp_gguf -DeploymentBuild -NativeModelManager -Version ${{ needs.get-version.outputs.version }}
-      - name: Bundle VC runtime
-        shell: pwsh
-        working-directory: build/windows-vulkan-release/bin
-        # App-local deployment of the MSVC runtime (see windows-cpu comments).
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          $redist = Get-ChildItem "$vs\VC\Redist\MSVC" -Directory |
-            Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } -Descending |
-            Select-Object -First 1
-          foreach ($sub in 'x64\Microsoft.VC143.CRT', 'x64\Microsoft.VC143.OPENMP') {
-            $dir = Join-Path $redist.FullName $sub
-            if (Test-Path $dir) {
-              Get-ChildItem "$dir\*.dll" | Where-Object {
-                $_.Name -match '^(vcruntime140|msvcp140|vcomp140)'
-              } | Copy-Item -Destination . -ErrorAction SilentlyContinue
-            }
-          }
-          Get-ChildItem *.dll | Select-Object Name | Out-String | Write-Host
-      - name: Stage bundle
-        shell: pwsh
-        working-directory: build/windows-vulkan-release/bin
-        run: |
-          cp ..\..\..\LICENSE . 2>$null
-          Copy-Item -Recurse ..\..\..\tools .\tools -ErrorAction SilentlyContinue
-          Copy-Item -Recurse ..\..\..\model_specs .\model_specs -ErrorAction SilentlyContinue
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-windows-x64-vulkan
-          path: build/windows-vulkan-release/bin/*
-      - name: Build and stage C API library
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          & "$vs/Common7/Tools/Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          cmake -S . -B build/windows-vulkan-release -DAUDIOCPP_BUILD_C_API=ON
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build/windows-vulkan-release --config Release --parallel $env:NUMBER_OF_PROCESSORS --target audiocpp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force -Path dist-lib/libs, dist-lib/include | Out-Null
-          Copy-Item include/audiocpp.h dist-lib/include/
-          Copy-Item LICENSE dist-lib/
-          Copy-Item build/windows-vulkan-release/bin/*.dll dist-lib/libs/
-          Move-Item build/windows-vulkan-release/bin/audiocpp.* dist-lib/libs/ -Force
-          Compress-Archive -Path dist-lib/* -DestinationPath audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-vulkan.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-vulkan
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-vulkan.zip
-
-
-  windows-vulkan-portable:
-    name: Windows x64 (Vulkan portable)
-    needs: [check-release, get-version]
-    if: ${{ needs.check-release.outputs.should_release == 'true' }}
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          repository: ${{ inputs.source_repository || github.repository }}
-          ref: ${{ needs.get-version.outputs.source_sha }}
-      - name: Install Vulkan SDK
-        shell: pwsh
-        run: |
-          curl.exe -o "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
-          & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
-          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\\VulkanSDK\\${env:VULKAN_VERSION}"
-          Add-Content $env:GITHUB_PATH "C:\\VulkanSDK\\${env:VULKAN_VERSION}\\bin"
-      - name: Build
-        shell: pwsh
-        run: |
-          .\scripts\build_windows.ps1 -Preset windows-vulkan-release -ConfigureOnly -DeploymentBuild -NativeModelManager -CpuArch baseline -Llamafile OFF -Version ${{ needs.get-version.outputs.version }}
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # The existing baseline preset disables AVX; also remove the remaining
-          # optional x86 extensions for this new portable target only.
-          cmake -S . -B build/windows-vulkan-release -DGGML_SSE42=OFF -DGGML_BMI2=OFF
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build/windows-vulkan-release --config Release --parallel $env:NUMBER_OF_PROCESSORS --target ($env:BUILD_TARGETS -split ' ')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Bundle VC runtime
-        shell: pwsh
-        working-directory: build/windows-vulkan-release/bin
-        # App-local deployment of the MSVC runtime (see windows-cpu comments).
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          $redist = Get-ChildItem "$vs\VC\Redist\MSVC" -Directory |
-            Sort-Object { try { [version]$_.Name } catch { [version]'0.0' } } -Descending |
-            Select-Object -First 1
-          foreach ($sub in 'x64\Microsoft.VC143.CRT', 'x64\Microsoft.VC143.OPENMP') {
-            $dir = Join-Path $redist.FullName $sub
-            if (Test-Path $dir) {
-              Get-ChildItem "$dir\*.dll" | Where-Object {
-                $_.Name -match '^(vcruntime140|msvcp140|vcomp140)'
-              } | Copy-Item -Destination . -ErrorAction SilentlyContinue
-            }
-          }
-          Get-ChildItem *.dll | Select-Object Name | Out-String | Write-Host
-      - name: Stage bundle
-        shell: pwsh
-        working-directory: build/windows-vulkan-release/bin
-        run: |
-          cp ..\..\..\LICENSE . 2>$null
-          Copy-Item -Recurse ..\..\..\tools .\tools -ErrorAction SilentlyContinue
-          Copy-Item -Recurse ..\..\..\model_specs .\model_specs -ErrorAction SilentlyContinue
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-bin-windows-x64-vulkan-portable
-          path: build/windows-vulkan-release/bin/*
-      - name: Build and stage C API library
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $vs = & $vswhere -latest -property installationPath
-          & "$vs/Common7/Tools/Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          cmake -S . -B build/windows-vulkan-release -DAUDIOCPP_BUILD_C_API=ON
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build build/windows-vulkan-release --config Release --parallel $env:NUMBER_OF_PROCESSORS --target audiocpp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          New-Item -ItemType Directory -Force -Path dist-lib/libs, dist-lib/include | Out-Null
-          Copy-Item include/audiocpp.h dist-lib/include/
-          Copy-Item LICENSE dist-lib/
-          Copy-Item build/windows-vulkan-release/bin/*.dll dist-lib/libs/
-          Move-Item build/windows-vulkan-release/bin/audiocpp.* dist-lib/libs/ -Force
-          Compress-Archive -Path dist-lib/* -DestinationPath audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-vulkan-portable.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-vulkan-portable
-          path: audio-${{ needs.get-version.outputs.tag }}-lib-windows-x64-vulkan-portable.zip
 
 
   windows-cuda:
@@ -967,37 +326,16 @@ jobs:
     needs:
       - check-release
       - get-version
-      - server-config-examples
       - macos-metal
-      - linux-cpu
-      - linux-cpu-portable
-      - linux-vulkan
-      - linux-vulkan-portable
-      - windows-cpu
-      - windows-cpu-portable
-      - windows-vulkan
       - windows-cuda
-      - linux-cuda-colab
-      - linux-cuda-library
-      - windows-vulkan-portable
     if: >-
       ${{
         always() &&
         needs.check-release.outputs.should_release == 'true' &&
         (github.ref_type == 'tag' || inputs.publish) &&
         needs.get-version.result == 'success' &&
-        needs.server-config-examples.result == 'success' &&
         needs.macos-metal.result == 'success' &&
-        needs.linux-cpu.result == 'success' &&
-        needs.linux-cpu-portable.result == 'success' &&
-        needs.linux-vulkan.result == 'success' &&
-        needs.linux-vulkan-portable.result == 'success' &&
-        needs.windows-cpu.result == 'success' &&
-        needs.windows-cpu-portable.result == 'success' &&
-        needs.windows-vulkan.result == 'success' &&
-        needs.windows-cuda.result == 'success' &&
-        needs.linux-cuda-library.result == 'success' &&
-        needs.windows-vulkan-portable.result == 'success'
+        needs.windows-cuda.result == 'success'
       }}
     runs-on: ubuntu-latest
     permissions:
@@ -1042,6 +380,8 @@ jobs:
             esac
           done
           rm -rf -- */
+          sha256sum *.zip *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
           ls -la
       - name: Create and push git tag
         run: |
@@ -1067,9 +407,26 @@ jobs:
       - name: Upload binaries to existing release
         if: ${{ steps.relstate.outputs.exists == 'true' }}
         run: |
-          gh release upload "${{ needs.get-version.outputs.tag }}" release-assets/*.zip release-assets/*.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "${{ needs.get-version.outputs.tag }}" release-assets/*.zip release-assets/*.tar.gz release-assets/SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
       # Newly-created tag with no release yet: create the release w/ notes.
       - name: Create release
         if: ${{ steps.relstate.outputs.exists != 'true' }}
         run: |
-          gh release create "${{ needs.get-version.outputs.tag }}" release-assets/*.zip release-assets/*.tar.gz --title "${{ needs.get-version.outputs.tag }}" --generate-notes --repo "$GITHUB_REPOSITORY"
+          TAG="${{ needs.get-version.outputs.tag }}"
+          SHA="${{ needs.get-version.outputs.source_sha }}"
+          {
+            echo "Shorts Factory build of audio.cpp (fork of 0xShug0/audio.cpp, Apache-2.0)."
+            echo
+            echo "- Release tag: \`${TAG}\`"
+            echo "- Source commit: \`${SHA}\`"
+            echo "- Version string: \`${{ needs.get-version.outputs.version }}\`"
+            echo "- Targets: Windows x64 CUDA 13.3, Windows x64 CUDA 12.4, macOS arm64 Metal"
+            echo "- Modifications: see FORK_NOTES.md at the source commit"
+            echo
+            echo "SHA-256 (also in SHA256SUMS.txt):"
+            echo
+            echo '```'
+            cat release-assets/SHA256SUMS.txt
+            echo '```'
+          } > release-notes.md
+          gh release create "$TAG" release-assets/*.zip release-assets/*.tar.gz release-assets/SHA256SUMS.txt --title "$TAG" --notes-file release-notes.md --repo "$GITHUB_REPOSITORY"
