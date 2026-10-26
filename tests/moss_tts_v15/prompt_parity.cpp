@@ -1,6 +1,10 @@
 /*
  * Prompt parity for MOSS-TTS-v1.5.
  *
+ * Modified by the Shorts Factory fork (boksajang/audio.cpp), 2026-10: a fixture
+ * carrying `assistant_codes` is a continuation prompt (the reference's
+ * mode="continuation"; dump_continuation_fixture.py). See FORK_NOTES.md.
+ *
  * Renders the <user_inst> turn with the audio.cpp builder and compares the encoded
  * rows against a dump from the reference MossTTSDelayProcessor. Every channel is
  * compared, not just the text one: an instruction-only prompt should be audio-pad
@@ -11,6 +15,7 @@
  *   moss_tts_v15_prompt_parity --model <dir> --prompt <ref_prompt.json>
  */
 
+#include "engine/community_models/moss_tts_v15/continuation.h"
 #include "engine/community_models/moss_tts_v15/prompt.h"
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/io/json.h"
@@ -41,6 +46,20 @@ std::optional<std::string> optional_field(const json::Value & object, const std:
         return std::nullopt;
     }
     return value->as_string();
+}
+
+// [n_vq][frames] codec-layout codes from a fixture.
+engine::models::moss_tts_v15::ReferenceAudio read_codes(const json::Value & codes) {
+    engine::models::moss_tts_v15::ReferenceAudio audio;
+    for (const auto & codebook : codes.as_array()) {
+        std::vector<int32_t> row;
+        for (const auto & code : codebook.as_array()) {
+            row.push_back(static_cast<int32_t>(code.as_number()));
+        }
+        audio.frames = static_cast<int64_t>(row.size());
+        audio.codes.push_back(std::move(row));
+    }
+    return audio;
 }
 
 }  // namespace
@@ -109,7 +128,27 @@ int main(int argc, char ** argv) {
         }
         std::cout << "rendered <user_inst> matches the reference\n";
 
-        const auto rows = engine::models::moss_tts_v15::build_generation_prefix(fields, config, *tokenizer);
+        // A fixture carrying assistant_codes is a continuation prompt: the prefix audio
+        // goes into an unfinished assistant turn rather than the reference slot.
+        const auto * assistant = reference.find("assistant_codes");
+        const bool continuation = assistant != nullptr && assistant->is_array();
+        if (continuation) {
+            config.audio_assistant_gen_slot_token_id =
+                json::require_i64(config_json, "audio_assistant_gen_slot_token_id");
+            // The session joins the transcript and the new text itself; check that its
+            // join gives the text the reference was handed.
+            const auto prefix_text = optional_field(reference, "continuation_text");
+            const auto new_text = optional_field(reference, "new_text");
+            if (prefix_text.has_value() && new_text.has_value()
+                && engine::models::moss_tts_v15::continuation::join_text(*prefix_text, *new_text) != fields.text) {
+                std::cout << "FAIL: continuation::join_text differs from the fixture text\n";
+                return 1;
+            }
+        }
+        std::cout << "mode: " << (continuation ? "continuation" : "generation") << "\n";
+        const auto rows = continuation
+            ? engine::models::moss_tts_v15::build_continuation_prefix(fields, read_codes(*assistant), config, *tokenizer)
+            : engine::models::moss_tts_v15::build_generation_prefix(fields, config, *tokenizer);
 
         const auto & expected_rows = reference.require("input_ids").as_array();
         const auto steps = static_cast<int64_t>(rows.text_tokens.size());

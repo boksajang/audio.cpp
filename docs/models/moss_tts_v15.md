@@ -57,6 +57,43 @@ request, not once per text chunk.
 f16's range and produce NaN from the first position. This is inherited from the
 family and is the same on `moss_voicegen`.
 
+### Continuation (Shorts Factory fork)
+
+> Added by the Shorts Factory fork (boksajang/audio.cpp), 2026-10. Not in upstream
+> audio.cpp; see `FORK_NOTES.md`.
+
+The reference processor's `mode="continuation"`: the take carries on from a piece of
+audio instead of starting fresh, so a paragraph can pick up the pace, level and
+intonation where the previous one stopped. Pass the audio to continue as the request's
+**audio input** and its exact transcript as `continuation_text`; the voice reference
+still sets the voice.
+
+```bash
+audiocpp_cli --family moss_tts_v15 --model <model-dir> --task clone \
+  --voice-ref channel_voice.wav \
+  --audio previous_paragraph_tail.wav \
+  --request-option continuation_text="Transcript of the tail audio." \
+  --text "The next paragraph." --out out.wav
+```
+
+C API: `audiocpp_request_set_audio()` for the tail PCM and
+`audiocpp_request_set_option(request, "continuation_text", ...)`; no new symbols, ABI 0.2.0.
+
+| aspect | behaviour |
+|---|---|
+| prompt | user turn = the v1.5 template with `Text` = `continuation_text` + one space + the new text and the voice reference in `Reference(s)`; then an unfinished assistant turn holding the tail's codes (no delay slots, no audio_end), as the reference builds it |
+| decoder | told the tail's frame count (`begin_continuation`), so every codebook is live and the delay pattern carries on |
+| length bounds | derived from the new text only, then moved past the tail frames (floor and ceiling) |
+| chunking | none: one take, whatever `text_chunk_size` says |
+| decode | tail codes + generated codes decoded together, then the tail is cut off by frame ratio (the codec is causal) |
+| output | the new text's audio only |
+| errors | `continuation_text` without audio input, or audio input without `continuation_text`, is rejected |
+| `moss_tts_v15.encoder_precision` | session option, `f16` (default, upstream's) or `f32`. f32 widens the codec encoder to f32 in the graph as moss_ttsd does; on moss_ttsd an f16 encoder changed 5-14% of the finer codebooks of the prompt audio. It applies to every encode in the session (voice reference and tail). Alias `moss_tts_v15.continuation_encoder` |
+
+Prompt parity against the reference (`tests/moss_tts_v15/reference/dump_continuation_fixture.py`
++ `moss_tts_v15_prompt_parity`) and listening/quality checks have not been run by the
+fork yet.
+
 ## ⚠ Limitation: voice-attribute instructions are not reliably followed
 
 `instruct` is accepted, but on this checkpoint a description of the *speaker* is

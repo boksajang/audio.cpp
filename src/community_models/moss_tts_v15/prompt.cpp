@@ -1,7 +1,11 @@
+// Modified by the Shorts Factory fork (boksajang/audio.cpp), 2026-10: adds
+// build_continuation_prefix for MOSS-TTS-v1.5 continuation. See FORK_NOTES.md.
+
 #include "engine/community_models/moss_tts_v15/prompt.h"
 
 #include "engine/framework/text/moss_tts_normalization.h"
 
+#include <stdexcept>
 #include <string>
 
 namespace engine::models::moss_tts_v15 {
@@ -57,6 +61,18 @@ codecs::MossTokenRows build_generation_prefix(
     const tokenizers::LlamaBpeTokenizer & tokenizer) {
     return decoders::build_moss_generation_prefix(
         render_user_inst(fields), fields.references, config, tokenizer, "MOSS-TTS-v1.5");
+}
+
+codecs::MossTokenRows build_continuation_prefix(
+    const PromptFields & fields,
+    const ReferenceAudio & assistant_audio,
+    const decoders::MossTtsDelayConfig & config,
+    const tokenizers::LlamaBpeTokenizer & tokenizer) {
+    if (assistant_audio.frames <= 0) {
+        throw std::runtime_error("MOSS-TTS-v1.5 continuation prefix audio has no frames");
+    }
+    return decoders::build_moss_continuation_prefix(
+        render_user_inst(fields), fields.references, assistant_audio, config, tokenizer, "MOSS-TTS-v1.5");
 }
 
 }  // namespace engine::models::moss_tts_v15

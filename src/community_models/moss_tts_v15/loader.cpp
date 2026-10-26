@@ -1,3 +1,6 @@
+// Modified by the Shorts Factory fork (boksajang/audio.cpp), 2026-10: continuation_text
+// request option and encoder_precision session option. See FORK_NOTES.md.
+
 #include "engine/community_models/moss_tts_v15/loader.h"
 
 #include "engine/community_models/moss_tts_v15/session.h"
@@ -49,9 +52,13 @@ runtime::ModelCliInterface cli() {
         {"repetition_penalty", "float", "Audio repetition penalty. Must be finite and positive when history is nonempty.", false, "1.1"},
         {"text_chunk_size", "<int>", "Maximum Unicode codepoints per long-form text chunk (default 200).", false, "200", "1"},
         {"text_chunk_mode", "word_budget|tag_aware|japanese|endline", "Text chunking policy; word_budget is the default and also accepts the legacy name default.", false, "word_budget"},
+        // [Shorts Factory fork] continuation.
+        {"continuation_text", "<text>", "Transcript of the request's input audio (--audio, audiocpp_request_set_audio). With both, the take continues that audio (the reference's mode=continuation) as one unchunked take; the voice reference still sets the voice."},
     };
     out.session_options = {
         {"moss_tts_v15.weight_type", "native|f32|bf16|q8_0", "Weight storage; default native preserves packaged quantization. f16 is rejected because this backbone produces NaN in it.", false, "native"},
+        // [Shorts Factory fork] encoder precision.
+        {"moss_tts_v15.encoder_precision", "f16|f32", "Codec encoder compute precision on GPU backends; f16 (default) is upstream's, f32 widens the encoder weights in the graph as moss_ttsd does and keeps a continuation prefix's codes exact. Alias: moss_tts_v15.continuation_encoder.", false, "f16"},
     };
     return out;
 }

@@ -3582,6 +3582,11 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         target_link_libraries(moss_ttsd_speakers_test PRIVATE engine_model_moss_ttsd)
         add_test(NAME moss_ttsd_speakers_test COMMAND moss_ttsd_speakers_test)
 
+        # [Shorts Factory fork] MOSS-TTS-v1.5 continuation helpers (header-only).
+        add_engine_unittest(moss_tts_v15_continuation_test tests/unittests/test_moss_tts_v15_continuation.cpp)
+        target_include_directories(moss_tts_v15_continuation_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
+        add_test(NAME moss_tts_v15_continuation_test COMMAND moss_tts_v15_continuation_test)
+
         add_engine_unittest(model_spec_system_test tests/unittests/test_model_spec_system.cpp)
         # So the test can read the specs this repository ships, rather than a
         # copy of them staged somewhere.

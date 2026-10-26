@@ -171,6 +171,12 @@
         ],
         "required": false,
         "default": "word_budget"
+      },
+      {
+        "name": "continuation_text",
+        "type": "string",
+        "required": false,
+        "description": "Transcript of the request's input audio. With both, the take continues that audio (the reference's mode=continuation) as one unchunked take; the voice reference still sets the voice. Added by the Shorts Factory fork."
       }
     ],
     "session": [
@@ -186,6 +192,17 @@
         "required": false,
         "default": "native",
         "description": "Backbone and head weight storage; default native, which keeps a GGUF package's own type. Forcing bf16 dequantises a quantised package and costs the VRAM the quantisation was meant to save. f16 is rejected: this backbone produces NaN in it."
+      },
+      {
+        "name": "encoder_precision",
+        "type": "enum",
+        "values": [
+          "f16",
+          "f32"
+        ],
+        "required": false,
+        "default": "f16",
+        "description": "Codec encoder compute precision on GPU backends; f16 (default) is upstream's, f32 widens the encoder weights in the graph and keeps a continuation prefix's codes exact. Alias: continuation_encoder. Added by the Shorts Factory fork."
       }
     ],
     "load": []

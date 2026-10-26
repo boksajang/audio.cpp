@@ -1,5 +1,8 @@
 #pragma once
 
+// Modified by the Shorts Factory fork (boksajang/audio.cpp), 2026-10: adds
+// build_continuation_prefix for MOSS-TTS-v1.5 continuation. See FORK_NOTES.md.
+
 // Prompt construction for MOSS-TTS-v1.5.
 //
 // The user turn is the moss_tts_delay family's eight-field <user_inst> block.
@@ -50,6 +53,18 @@ std::string render_user_inst(const PromptFields & fields);
 // reference spans expanded into rows, and the assistant header.
 codecs::MossTokenRows build_generation_prefix(
     const PromptFields & fields,
+    const decoders::MossTtsDelayConfig & config,
+    const tokenizers::LlamaBpeTokenizer & tokenizer);
+
+// [Shorts Factory fork] The prefix for continuation (the reference's
+// mode="continuation"): the same user turn, then an unfinished assistant turn
+// holding `assistant_audio`'s codes for the model to carry on from. The caller
+// puts the prefix audio's transcript in front of fields.text
+// (continuation::join_text). The span is left open on purpose; see
+// decoders::build_moss_continuation_prefix.
+codecs::MossTokenRows build_continuation_prefix(
+    const PromptFields & fields,
+    const ReferenceAudio & assistant_audio,
     const decoders::MossTtsDelayConfig & config,
     const tokenizers::LlamaBpeTokenizer & tokenizer);
 

@@ -1,0 +1,59 @@
+# Shorts Factory fork (boksajang/audio.cpp): fast compile + unit-test check for
+# the fork's patches, run on every push to an sf/** branch. Builds only the
+# MOSS-TTS-v1.5 model objects and its tests on a CPU Linux runner, so a compile
+# error shows up in minutes instead of after the two-hour release build.
+# Added by the fork; see FORK_NOTES.md.
+
+name: SF check
+
+on:
+  push:
+    branches:
+      - 'sf/**'
+  workflow_dispatch:
+
+concurrency:
+  group: sf-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  moss-tts-v15:
+    name: MOSS-TTS-v1.5 compile + tests (Linux CPU)
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc-13
+      CXX: g++-13
+      BUILD_DIR: build/sf-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check loader/spec sync
+        run: |
+          python3 tools/check_loader_catalog_sync.py --self-test
+          python3 tools/check_loader_catalog_sync.py
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-13 g++-13 cmake ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B "$BUILD_DIR" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DAUDIOCPP_VERSION=sf-check \
+            -DENGINE_ENABLE_CUDA=OFF -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_BUILD_TESTS=ON -DENGINE_BUILD_MODEL_TESTS=ON
+
+      - name: Build MOSS-TTS-v1.5 objects and tests
+        run: |
+          cmake --build "$BUILD_DIR" --parallel "$(nproc)" --target \
+            engine_model_moss_tts_v15 \
+            moss_tts_v15_continuation_test \
+            moss_tts_v15_text_normalization_test \
+            moss_tts_v15_prompt_parity
+
+      - name: Run tests
+        run: |
+          ctest --test-dir "$BUILD_DIR" --output-on-failure \
+            -R '^(moss_tts_v15_continuation_test|moss_tts_v15_text_normalization)'
